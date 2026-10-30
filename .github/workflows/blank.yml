@@ -126,3 +126,96 @@ jobs:
          (out/(name+'.stdout')).write_text(p.stdout);(out/(name+'.stderr')).write_text(p.stderr)
          print('COMMAND',name,json.dumps(args),'EXIT',p.returncode,flush=True)
          if p.stderr:print(p.stderr,flush=True)
+         return p
+
+        def record(name,status,detail):
+         results.append(dict(probe=name,status=status,detail=detail));print(name,status,detail,flush=True)
+
+        def fetch(name,sha,path):
+         url=f'https://raw.githubusercontent.com/swiftlang/swift/{sha}/{path}'
+         data=urllib.request.urlopen(url,timeout=60).read();dest=out/name;dest.write_bytes(data)
+         (out/(name+'.source.json')).write_text(json.dumps(dict(url=url,sha256=hashlib.sha256(data).hexdigest()),indent=2))
+         return dest
+
+        def tool(name):
+         p=run('locate-'+name,['xcrun','--toolchain','XcodeDefault','--find',name]);return p.stdout.strip() if p.returncode==0 else None
+
+        swiftc=tool('swiftc');frontend=tool('swift-frontend');silopt=tool('sil-opt');arcopt=tool('swift-llvm-opt')
+        sdk_result=run('macos-sdk',['xcrun','--sdk','macosx','--show-sdk-path'])
+        if sdk_result.returncode or not pathlib.Path(sdk_result.stdout.strip()).is_dir():
+         record('sdk','ERROR','Selected macOS SDK unavailable; no compiler regressions executed.')
+         (out/'summary.json').write_text(json.dumps(results,indent=2));sys.exit(1)
+        sdk=sdk_result.stdout.strip()
+        print('Explicit macOS SDK:',sdk,flush=True)
+        # PR 92708: exact new source test, compiler verifier catches missing dealloc_stack.
+        try:
+         weak=fetch('weak_capture_osize_stack_leak.swift','0671aa70aa028f83a7336e3c4820c3489ea2ff69','test/SILOptimizer/weak_capture_osize_stack_leak.swift')
+         for label,flags in [('control-Onone',['-Onone']),('Osize',['-Osize']),('Osize-CMO',['-Osize','-cross-module-optimization'])]:
+          p=run('92708-'+label,[swiftc,'-sdk',sdk,*flags,'-Xfrontend','-sil-verify-all','-emit-sil',str(weak),'-o',str(out/('92708-'+label+'.sil'))])
+          record('92708-'+label,'PASS' if p.returncode==0 else 'ERROR','Exact upstream source compiled with SIL verification; errors require log review, not automatic missing-patch inference.')
+        except Exception as e:record('92708','ERROR',str(e))
+        # PR 92755: exact upstream ARC pass and added test functions. Frontend multicall
+        # invocation is itself an upstream RUN line, but may be omitted in retail builds.
+        try:
+         ir=fetch('basic.ll','a15dfed774de584fafcaf656e35566e1daac2eeb','test/LLVMPasses/basic.ll')
+         command=[arcopt] if arcopt else [frontend,'-swift-llvm-opt'] if frontend else None
+         if not command:record('92755','SKIP','No shipped Swift LLVM optimizer entry point.')
+         else:
+          help_result=run('92755-tool-help',command+['--help'])
+          if help_result.returncode!=0:record('92755','SKIP','Swift LLVM optimizer entry point unavailable; see help log.')
+          else:
+           p=run('92755-arc',command+['-passes=swift-llvm-arc-optimize',str(ir)])
+           if p.returncode:record('92755','ERROR','Optimizer invocation failed; do not classify as patch missing.')
+           else:
+            control,check=arc_checks(p.stdout)
+            record('92755','PASS' if control and check else 'FAIL' if control else 'INCONCLUSIVE','Positive control: monotonic retain/release eliminated; release ordering retained; two unowned checks retained. Inspect output before concluding patch identity.')
+        except Exception as e:record('92755','ERROR',str(e))
+        # PR 92632: original SIL regression with a plain-store forwarding control.
+        try:
+         sil=fetch('redundant_load_elim_ossa.sil','d47335d8962d795627f87bd2275d019a862c3902','test/SILOptimizer/redundant_load_elim_ossa.sil')
+         sil_command=[silopt] if silopt else [frontend,'-sil-opt'] if frontend else None
+         sil_help=run('92632-tool-help',sil_command+['--help']) if sil_command else None
+         if not sil_help or sil_help.returncode!=0:record('92632','SKIP','No available shipped SIL optimizer entry point; generic source smoke tests would not prove this precise alias-analysis fix.')
+         else:
+          control='''\nsil [ossa] @probe_plain_store : $@convention(thin) (Int) -> Int {\nbb0(%0 : $Int):\n  %1 = alloc_stack $Int\n  store %0 to [trivial] %1\n  %2 = load [trivial] %1\n  dealloc_stack %1\n  return %2\n}\n'''
+          test=out/'92632-with-control.sil';test.write_text(sil.read_text()+control)
+          p=run('92632-sil',sil_command+['-sdk',sdk,'-sil-print-types','-enable-sil-verify-all',str(test),'-redundant-load-elimination'])
+          if p.returncode:record('92632','ERROR','SIL test cannot run with this shipped tool; inspect parser/pass logs.')
+          else:
+           control_ok,m=sil_checks(p.stdout)
+           record('92632','PASS' if control_ok and m else 'FAIL' if control_ok else 'INCONCLUSIVE','Raw-pointer stored-address load survives callee; plain-store control forwarded. This establishes behavior only.')
+        except Exception as e:record('92632','ERROR',str(e))
+        (out/'summary.json').write_text(json.dumps(results,indent=2))
+        # SKIP is intentional and never represented as a passing regression.
+        print(json.dumps(results,indent=2))
+
+        sys.exit(1 if any(r["status"] in {"FAIL", "ERROR", "INCONCLUSIVE"} for r in results) else 0)
+
+        PYPROBE
+    - name: Summarize individual probe outcomes
+      if: always()
+      shell: bash
+      run: |
+        python3 - <<'PYRESULT'
+        import json,os,pathlib
+        p=pathlib.Path('probe-results/summary.json')
+        with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f:
+         f.write('\n## Regression outcomes\n\n')
+         if p.exists():
+          for r in json.loads(p.read_text()):
+           f.write('- '+r['probe']+': **'+r['status']+'**. '+r['detail']+'\n')
+         else:
+          f.write('No regression summary was produced. This is not a pass.\n')
+         f.write('\nPASS records observed behavior only, not proof of branch or commit ancestry. SKIP means untested.\n')
+        PYRESULT
+    - name: Preserve evidence
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: xcode-27B48-evidence
+        path: |-
+          results
+          probe-results
+        retention-days: 30
+'on':
+  workflow_dispatch: {}
