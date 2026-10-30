@@ -1,0 +1,14 @@
+{
+  "basic.ll": {
+    "url": "https://raw.githubusercontent.com/swiftlang/swift/a15dfed774de584fafcaf656e35566e1daac2eeb/test/LLVMPasses/basic.ll",
+    "sha256": "f6f7032e76cc572d0f39a487d00aa78676de03cfd1e4684822a8f41246660e30"
+  },
+  "redundant_load_elim_ossa.sil": {
+    "url": "https://raw.githubusercontent.com/swiftlang/swift/d47335d8962d795627f87bd2275d019a862c3902/test/SILOptimizer/redundant_load_elim_ossa.sil",
+    "sha256": "8663dd84544d9f6e6138c847336e4406176e7d5c3bc155c033a0a2f8552f0c4b"
+  },
+  "weak_capture_osize_stack_leak.swift": {
+    "url": "https://raw.githubusercontent.com/swiftlang/swift/0671aa70aa028f83a7336e3c4820c3489ea2ff69/test/SILOptimizer/weak_capture_osize_stack_leak.swift",
+    "sha256": "12515fedf81cf4da6a6dbcf6d5eb99306bd7002ce98b4f8770ab8dbe37683f97"
+  }
+}
