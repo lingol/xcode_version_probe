@@ -15,7 +15,34 @@ results = REPO / "results"
 results.mkdir(exist_ok=True)
 
 
+def inventory_xcodes():
+    """Record the allocated runner's real installations, not documentation aliases."""
+    inventory = []
+    seen = set()
+    for app in sorted(Path("/Applications").glob("Xcode*.app")):
+        real = app.resolve()
+        if real in seen:
+            continue
+        seen.add(real)
+        developer = real / "Contents/Developer"
+        env = dict(os.environ, DEVELOPER_DIR=str(developer))
+        proc = subprocess.run(["xcodebuild", "-version"], env=env, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+        item = dict(path=str(app), real_path=str(real), exit_code=proc.returncode,
+                    version=proc.stdout.strip())
+        inventory.append(item)
+        print("INSTALLED_XCODE", json.dumps(item), flush=True)
+    (results / "installed-xcodes.json").write_text(json.dumps(inventory, indent=2) + "\n")
+    return inventory
+
+
 def main():
+    installed = inventory_xcodes()
+    matches = [item for item in installed if item["exit_code"] == 0 and
+               f"Build version {config['expected_build']}" in item["version"].splitlines()]
+    if not matches:
+        raise RuntimeError(f"REQUESTED BUILD UNAVAILABLE: {config['expected_build']}; no regression probes executed")
+    os.environ["DEVELOPER_DIR"] = str(Path(matches[0]["real_path"]) / "Contents/Developer")
     with (results / "fingerprint.txt").open("w") as evidence:
         def capture(args):
             print("COMMAND", json.dumps(args), flush=True)
